@@ -8,8 +8,6 @@ import kotlin.concurrent.withLock
 
 class CoarseGrainedBank(accountsNumber: Int) : Bank {
     private val accounts: Array<Account> = Array(accountsNumber) { Account() }
-
-    // TODO: use this mutex to protect all bank operations.
     private val globalLock = ReentrantLock()
 
     override fun getAmount(id: Int): Long {
