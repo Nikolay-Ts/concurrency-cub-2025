@@ -8,19 +8,18 @@ import kotlin.concurrent.withLock
 
 class FineGrainedBank(accountsNumber: Int) : Bank {
     private val accounts: Array<Account> = Array(accountsNumber) { Account() }
-    private val locks: Array<ReentrantLock> = Array(accountsNumber) { ReentrantLock() }
 
     override fun getAmount(id: Int): Long {
-        locks[id].withLock {
-            val account = accounts[id]
+        val account = accounts[id]
+        account.lock.withLock {
             return account.amount
         }
     }
 
     override fun deposit(id: Int, amount: Long): Long {
         require(amount > 0) { "Invalid amount: $amount" }
-        locks[id].withLock {
-            val account = accounts[id]
+        val account = accounts[id]
+        account.lock.withLock {
             check(!(amount > MAX_AMOUNT || account.amount + amount > MAX_AMOUNT)) { "Overflow" }
             account.amount += amount
             return account.amount
@@ -29,8 +28,8 @@ class FineGrainedBank(accountsNumber: Int) : Bank {
 
     override fun withdraw(id: Int, amount: Long): Long {
         require(amount > 0) { "Invalid amount: $amount" }
-        locks[id].withLock {
-            val account = accounts[id]
+        val account = accounts[id]
+        account.lock.withLock {
             check(account.amount - amount >= 0) { "Underflow" }
             account.amount -= amount
             return account.amount
@@ -41,9 +40,13 @@ class FineGrainedBank(accountsNumber: Int) : Bank {
         require(amount > 0) { "Invalid amount: $amount" }
         require(fromId != toId) { "fromId == toId" }
 
+        val firstId = minOf(fromId, toId)
+        val secondId = maxOf(fromId, toId)
+        val first = accounts[firstId]
+        val second = accounts[secondId]
 
-        locks[fromId].withLock {
-            locks[toId].withLock {
+        first.lock.withLock {
+            second.lock.withLock {
                 val src = accounts[fromId]
                 val dst = accounts[toId]
 
