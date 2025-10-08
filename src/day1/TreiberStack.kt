@@ -6,8 +6,6 @@ class TreiberStack<E> : Stack<E> {
     // Initially, the stack is empty.
     private val top = AtomicReference<Node<E>?>(null)
 
-
-
     override fun push(element: E) {
         while (true) {
             val curTop = top.get()
