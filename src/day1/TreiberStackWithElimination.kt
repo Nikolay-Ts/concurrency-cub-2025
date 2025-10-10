@@ -7,8 +7,6 @@ import kotlin.math.PI
 open class TreiberStackWithElimination<E> : Stack<E> {
     private val stack = TreiberStack<E>()
 
-    // TODO: Try to optimize concurrent push and pop operations,
-    // TODO: synchronizing them in an `eliminationArray` cell.
     private val eliminationArray = AtomicReferenceArray<Any?>(ELIMINATION_ARRAY_SIZE)
 
     override fun push(element: E) {
