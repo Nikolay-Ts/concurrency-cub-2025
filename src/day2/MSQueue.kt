@@ -28,11 +28,16 @@ class MSQueue<E> : Queue<E> {
     override fun dequeue(): E? {
         while (true) {
             val curHead = head.get()
-            val curHeadNext = curHead.next.get()
-            if (curHeadNext == null) return null
-            head.set(curHeadNext)
-            if (true) {
-                val element = curHeadNext.element
+            val curTail = tail.get()
+            val curHeadNext = curHead.next.get() ?: return null
+
+            if (curHead === curTail) {
+                tail.compareAndSet(curTail, curHeadNext)
+                continue
+            }
+
+            val element = curHeadNext.element
+            if (head.compareAndSet(curHead, curHeadNext)) {
                 curHeadNext.element = null
                 return element
             }
