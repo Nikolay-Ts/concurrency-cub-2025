@@ -12,6 +12,9 @@ class MSQueueTest {
     @Operation
     fun dequeue() = q.dequeue()
 
+    @Validate
+    fun verify() = q.validate()
+
     @Test
     fun test() = ModelCheckingOptions()
         .check(this::class)
