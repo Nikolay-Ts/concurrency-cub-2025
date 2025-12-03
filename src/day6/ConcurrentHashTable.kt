@@ -3,21 +3,22 @@
 package day6
 
 import java.util.concurrent.atomic.*
-import kotlin.math.absoluteValue
 
 class ConcurrentHashTable<K : Any, V : Any>(initialCapacity: Int) {
     private val table = AtomicReference(Table<K, V>(initialCapacity))
 
     fun put(key: K, value: V): V? {
         while (true) {
-            val putResult = table.get().put(key, value)
+            val currentTable  = table.get()
+            val putResult = currentTable.put(key, value)
             if (putResult === NEEDS_REHASH) {
-                resize()
+                resize(currentTable)
             } else {
                 return putResult as V?
             }
         }
     }
+
 
     fun get(key: K): V? {
         return table.get().get(key)
@@ -27,169 +28,199 @@ class ConcurrentHashTable<K : Any, V : Any>(initialCapacity: Int) {
         return table.get().remove(key)
     }
 
-    private fun resize() {
-        val currentTable = table.get()
-        val newCapacity = currentTable.capacity * 2
-        val newTable = Table<K, V>(newCapacity)
-
-        for (i in 0 until currentTable.capacity) {
-            val key = currentTable.keys.get(i)
-            val value = currentTable.values.get(i)
-
-            if (key != null && key !== EMPTY && key !== TOMBSTONE) {
-                @Suppress("UNCHECKED_CAST")
-                val actualKey = key as K
-                if (value != null && value !== TOMBSTONE) {
-                    @Suppress("UNCHECKED_CAST")
-                    val actualValue = value
-                    newTable.putForResize(actualKey, actualValue)
-                }
-            }
+    private fun resize(curTable: Table<K, V>) {
+        val newTable = Table<K, V>(curTable.capacity * 2)
+        curTable.next.compareAndSet(null, newTable)
+        for (i in 0 until curTable.capacity) {
+            curTable.copySlot(i)
         }
-        table.compareAndSet(currentTable, newTable)
+        table.compareAndSet(curTable, curTable.next.get())
     }
 
     class Table<K : Any, V : Any>(val capacity: Int) {
         val keys = AtomicReferenceArray<Any?>(capacity)
-        val values = AtomicReferenceArray<V?>(capacity)
-
-        private val size = AtomicInteger(0)
-        private val threshold = (capacity * 0.75).toInt()
-
-        init {
-            for (i in 0 until capacity) {
-                keys.set(i, EMPTY)
-                values.set(i, null)
-            }
-        }
+        val values = AtomicReferenceArray<Any?>(capacity)
+        val next = AtomicReference<Table<K, V>?>(null)
 
         fun put(key: K, value: V): Any? {
-            val hash = key.hashCode().absoluteValue
-            var index = hash % capacity
-            var firstTombstone = -1
+            var idx = index(key)
+            val start = idx
 
-            for (attempt in 0 until capacity) {
-                val currentKey = keys.get(index)
-
-                when (currentKey) {
-                    EMPTY -> {
-                        if (firstTombstone != -1) firstTombstone else index
-                        if (firstTombstone == -1) {
-                            if (keys.compareAndSet(index, EMPTY, key)) {
-                                values.set(index, value)
-                                if (size.incrementAndGet() > threshold) {
-                                    return NEEDS_REHASH
-                                }
-                                return null
-                            }
-                        } else {
-                            val tombstoneKey = keys.get(firstTombstone)
-                            if (tombstoneKey !== TOMBSTONE) {
-                                return put(key, value)
-                            }
-
-                            if (keys.compareAndSet(firstTombstone, TOMBSTONE, key)) {
-                                values.set(firstTombstone, value)
-                                size.incrementAndGet()
-                                return null
-                            }
-                            return put(key, value)
-                        }
-                    }
-                    TOMBSTONE -> {
-                        if (firstTombstone == -1) {
-                            firstTombstone = index
-                        }
-                    }
-                    key -> {
-                        val oldValue = values.getAndSet(index, value)
-                        return oldValue
-                    }
-                    else -> { }
+            while (true) {
+                if (next.get() != null) {
+                    copySlot(idx)
                 }
 
-                index = (index + 1) % capacity
-            }
+                when (val k = keys.get(idx)) {
+                    is KeyValue -> {
+                        helpPut(idx, k)
+                        continue
+                    }
+                    is MovedKey -> {
+                        if (k.key == key) {
+                            return next.get()!!.put(key, value)
+                        }
+                    }
+                    null -> {
+                        val kv = KeyValue(key, value)
+                        if (keys.compareAndSet(idx, null, kv)) {
+                            helpPut(idx, kv)
+                            return null
+                        }
+                        continue
+                    }
+                    key -> {
+                        while (true) {
+                            val curVal = values.get(idx)
+                            if (curVal is MovedValue) {
+                                copySlot(idx)
+                                break
+                            }
+                            if (values.compareAndSet(idx, curVal, value)) {
+                                return if (curVal === TOMBSTONE) null else curVal as V?
+                            }
+                        }
+                        continue
+                    }
+                }
 
-            return NEEDS_REHASH
+                idx = (idx + 1) % capacity
+                if (idx == start) return NEEDS_REHASH
+            }
         }
 
         fun get(key: K): V? {
-            val hash = key.hashCode().absoluteValue
-            var index = hash % capacity
+            var idx = index(key)
+            val start = idx
 
-            for (attempt in 0 until capacity) {
-                val currentKey = keys.get(index)
-
-                when (currentKey) {
-                    EMPTY -> return null
-                    key -> {
-                        val value = values.get(index)
-                        return if (value === TOMBSTONE) null else value as V?
-                    }
-                    TOMBSTONE -> { }
+            while (true) {
+                if (next.get() != null) {
+                    copySlot(idx)
                 }
 
-                index = (index + 1) % capacity
-            }
+                when (val k = keys.get(idx)) {
+                    is KeyValue -> {
+                        helpPut(idx, k)
+                        continue
+                    }
+                    is MovedKey -> {
+                        if (k.key == key) {
+                            return next.get()!!.get(key)
+                        }
+                    }
+                    null -> return null
+                    key -> {
+                        val v = values.get(idx)
+                        return when {
+                            v === TOMBSTONE -> null
+                            v is MovedValue -> v.value as V?
+                            else -> v as V?
+                        }
+                    }
+                }
 
-            return null
+                idx = (idx + 1) % capacity
+                if (idx == start) return null
+            }
         }
 
         fun remove(key: K): V? {
-            val hash = key.hashCode().absoluteValue
-            var index = hash % capacity
+            var idx = index(key)
+            val start = idx
 
-            for (attempt in 0 until capacity) {
-                val currentKey = keys.get(index)
-
-                when (currentKey) {
-                    EMPTY -> return null
-                    key -> {
-                        val oldValue = values.get(index)
-                        if (oldValue !== TOMBSTONE) {
-                            // Mark value as tombstone
-                            if (values.compareAndSet(index, oldValue, TOMBSTONE as V?)) {
-                                keys.compareAndSet(index, key, TOMBSTONE)
-                                size.decrementAndGet()
-                                return oldValue
-                            }
-                            return remove(key)
-                        }
-                        return null
-                    }
-                    TOMBSTONE -> { }
+            while (true) {
+                if (next.get() != null) {
+                    copySlot(idx)
                 }
 
-                index = (index + 1) % capacity
-            }
+                when (val k = keys.get(idx)) {
+                    is KeyValue -> {
+                        helpPut(idx, k)
+                        continue
+                    }
+                    is MovedKey -> {
+                        if (k.key == key) {
+                            return next.get()!!.remove(key)
+                        }
+                    }
+                    null -> return null
+                    key -> {
+                        while (true) {
+                            when (val curVal = values.get(idx)) {
+                                is MovedValue -> {
+                                    copySlot(idx)
+                                    return next.get()!!.remove(key)
+                                }
+                                TOMBSTONE -> return null
+                                else -> {
+                                    if (values.compareAndSet(idx, curVal, TOMBSTONE)) {
+                                        return curVal as V?
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
 
-            return null
+                idx = (idx + 1) % capacity
+                if (idx == start) return null
+            }
         }
 
-        internal fun putForResize(key: K, value: V) {
-            val hash = key.hashCode().absoluteValue
-            var index = hash % capacity
+        fun copySlot(idx: Int) {
+            val nextTable = next.get() ?: return
 
-            for (attempt in 0 until capacity) {
-                val currentKey = keys.get(index)
-
-                if (currentKey === EMPTY || currentKey === TOMBSTONE) {
-                    if (keys.compareAndSet(index, currentKey, key)) {
-                        values.set(index, value)
-                        return
+            while (true) {
+                when (val k = keys.get(idx)) {
+                    null -> return
+                    is MovedKey -> return
+                    is KeyValue -> {
+                        helpPut(idx, k)
+                        continue
                     }
-                } else if (currentKey == key) {
-                    values.set(index, value)
-                    return
+                    else -> {
+                        when (val v = values.get(idx)) {
+                            null, TOMBSTONE -> return
+                            is MovedValue -> {
+                                val newIdx = nextTable.index(k as K)
+                                val kv = KeyValue(k, v.value)
+                                nextTable.keys.compareAndSet(newIdx, null, kv)
+                                keys.set(idx, MovedKey(k))
+                                return
+                            }
+                            else -> {
+                                if (!values.compareAndSet(idx, v, MovedValue(v))) {
+                                    continue
+                                }
+                                val newIdx = nextTable.index(k as K)
+                                val kv = KeyValue(k, v)
+                                nextTable.keys.compareAndSet(newIdx, null, kv)
+                                keys.set(idx, MovedKey(k))
+                                return
+                            }
+                        }
+                    }
                 }
-
-                index = (index + 1) % capacity
             }
+        }
+
+        private fun helpPut(idx: Int, kv: KeyValue) {
+            values.compareAndSet(idx, null, kv.value)
+            keys.compareAndSet(idx, kv, kv.key)
+        }
+
+        private fun index(key: K): Int {
+            return (key.hashCode() and Int.MAX_VALUE) % capacity
         }
     }
 }
 
 private val NEEDS_REHASH = Any()
-private val EMPTY = Any()
+
 private val TOMBSTONE = Any()
+
+private class KeyValue(val key: Any?, val value: Any?)
+
+private class MovedKey(val key: Any?)
+
+private class MovedValue(val value: Any?)
